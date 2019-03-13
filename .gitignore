@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+
+*.Rproj
+
+trains_cache*
+trains_files*

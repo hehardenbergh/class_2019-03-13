@@ -1,0 +1,958 @@
+---
+title: "Replication Report on Enos (2014)"
+author: "David Kane"
+citation_package: natbib
+output:
+  html_document: default
+  pdf_document: default
+bibliography: bibliography.bib
+---
+
+
+## Abstract
+
+I replicate "Causal effect of intergroup contact on exclusionary attitudes" (@enos2014) using code/data deposited in the Harvard Dataverse (@DVN/DOP4UB_2017). In a randomized trial, @enos2014 finds that exposure to Spanish speakers on train platform causes an increase in exclusionary attitudes. There are two figures and three tables in the original article. Figure 2 and Tables 1 and 2 can be, almost, perfectly replicated. Table 3 and Figure 1 can not be replicated from the code/data on deposit at the Dataverse. See the Appendix for details. I also explore alternative modelling approaches, most importantly by creating a new variable which measures the overall changes in exclusionary attitudes. This approach, while substantively different from @enos2014, leads to the same conclusion: short exposures to Hispanic-looking Spanish speakers causes an increase in exclusionary attitudes among Boston commuters. The magnitude of the effect is about 1/3 of the starting difference between Republicans and Democrats.
+
+<!-- Can I really justify that? Maybe!  Back of the envelope, the starting attitude is 11.1 among the 19 Republicans and 8.8 among the 96 non-Republicans. That is a difference of 2.3. In many of the basic linear regressions, the coefficient of treatment is between 0.7 and 0.9. Of course, it would be better to use whatever number comes out of the most sophisticated final model. -->
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(knitr)
+library(ri)
+library(RItools)
+library(gt)
+library(RColorBrewer)
+library(broom)
+library(stringr)
+library(rstanarm)
+library(tidyverse)
+library(stargazer)
+library(rstan)
+
+
+dat.all <- read_csv("pnas_data.csv") %>% 
+  
+  select(habits, station, treated_unit,
+         numberim.x, Remain.x, Englishlan.x,
+         numberim.y, Remain.y, Englishlan.y, 
+         line.x, t.time,
+         treatment, liberal, republican, obama.disapprove, ride.everyday, 
+         voted.2010, romney.voter, Hispanics.x, age, residency.new, college, 
+         male, hispanic.new,  white, income.new) 
+
+stopifnot(length(table(dat.all$station)) == 9)
+
+```
+
+
+```{r clean_up}
+
+
+x <- dat.all %>% 
+  
+
+  mutate(start_att = numberim.x + Remain.x + Englishlan.x,
+         end_att = numberim.y + Remain.y + Englishlan.y,
+         number_diff = numberim.y  - numberim.x,
+         remain_diff = Remain.y - Remain.x,
+         english_diff = Englishlan.y - Englishlan.x,
+         all_chg = number_diff + remain_diff + english_diff) %>% 
+  
+  # Delete component parts that we no longer need.
+
+  select(- ends_with("diff")) %>% 
+  select(- starts_with("numberim")) %>% 
+  select(- starts_with("Remain")) %>%
+  select(- starts_with("Englishlan")) %>% 
+  
+  # Handling NAs is always tricky. I should make it easy to see if saving the
+  # three savable rows makes a substantive difference to any conclusion.
+  
+  drop_na(all_chg) %>% 
+  
+
+  mutate(waits_on_platform = ifelse(habits == 2, TRUE, FALSE)) %>% 
+  
+  # Break up the information in treated_unit into component parts.
+  
+ separate(col = treated_unit, 
+           into = c("line", "train_station", "platform"), 
+           sep = "_") %>% 
+
+
+
+  select(-station) %>% 
+  rename(station = "train_station") %>% 
+  
+  select(-line.x) %>% 
+  
+
+  select(-platform) %>% 
+
+  
+ 
+  mutate(time_length = ifelse(t.time %in% c('t2a', 't4a'), "3-day", "10-day")) %>% 
+  mutate(time_length = factor(time_length, levels = c("3-day", "10-day"))) %>% 
+  mutate(time_level = ifelse(str_detect(t.time, "2"), "2", "4")) %>% 
+  
+
+  select(all_chg, treatment, line, station, start_att, 
+         waits_on_platform, time_length, time_level, 
+         male, republican, white, income.new)
+
+
+stopifnot(x %>% drop_na() %>% nrow() == nrow(x))
+  
+
+```
+
+# A Unfied Measure of Changes in Exclusionary Attitudes
+
+I construct a unified measure of the change in exclusionary attitudes by combining the results for the three questions asked in @enos2014. Those questions were: 
+
+* Do you think the number of immigrants from Mexico whoare permitted to come to the United States to live should beincreased, left the same, or decreased?
+
+* Would you favor allowing persons that have immigrated tothe United States illegally to remain in the country if they areemployed and have no criminal history?
+
+* Some people favor a state law declaring English as theOfficial Language. Some other people oppose such a law.Would you favor such a law?”
+
+Answers were on a 1 to 5 scale, with higher values corresponding to more exclusionary attitudes. Each participant answered these questions both at the start and end of the experiment. @enos2014 looked at the (normalized) change in values for each question separately. I, instead, combine the raw changes for all three into a unified measure which ranges from `r min(x$all_chg)` to `r max(x$all_chg)`, with positive values indicating an increase in exclusionary attitudes.
+
+## Basic Linear Model
+
+
+The following table is meant to demonstrate the robustness of the findings with an alternative meausre of the outcome, and to demonstrate that this new measure of attitude change is a potentially valid measure. In this case, rather than looking at each survey question indivually, they are combined into one index of overall attitude change. All columns report results from linear regression models with a variety of different covariates. Notice indicators of significance have been changed from the stargazer default.
+
+<div style="margin-bottom:50px;">
+</div>
+```{r lm_1, results="asis"}
+# Now that we have a reduced set of the data, it is time to do some modeling. My
+# purpose here is to list some modeling ideas which I hope Mark will have time
+# to tackle. (And apologies for coming to you so late with this! I had planned
+# on doing it all myself.) Feel free to skip some of these and add your own. Big
+# picture: We want to model the work we expect to see from them on the midterm.
+
+# 1. Three or four basic linear regressions, each with different sets of
+# independent variables, but always with treatment included, and no interaction
+# terms. Results displayed as a nice stargazer table. Basic idea is to just show
+# that treatment has a robust connection to all_chg.
+
+# basic linear model to assess effect of treatment
+
+ols1 <- lm(all_chg ~ treatment, data = x)
+
+# with basic unit-level covariates
+
+ols2 <- lm(all_chg ~ treatment + waits_on_platform + white + income.new, data = x)
+
+# treatment effect with line and station fixed effects 
+
+ols3 <- lm(all_chg ~ treatment + line + station, data = x)
+
+# everything to really evaluate robustness of treatment
+
+ols4 <- lm(all_chg ~ treatment + line + station + waits_on_platform + white + income.new, data = x)
+
+# Put it in a nice table
+
+stargazer(ols1, ols2, ols3, ols4, 
+          type="html",
+          dep.var.labels = "Overall Attitude Change",
+          covariate.labels = c("Treatment",
+                               "Waits on Platform",
+                               "White",
+                               "Income",
+                               "Franklin Line",
+                               "Grafton Sta.",
+                               "Natick Sta.",
+                               "Norfolk Sta.",
+                               "Norwood Sta.",
+                               "Southborough Sta.",
+                               "Wellesley Hills Sta.",
+                               "West Natick Sta.",
+                               "Windsor Gardens Sta.",
+                               "Intercept"),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          notes = "Natick Station omitted due to multicollinearity. All coefficients reported above are OLS coefficients. Positive numbers indicate more conservative responses.",
+          notes.align = "l"
+          )
+```
+<div style="margin-bottom:50px;">
+</div>
+
+## Linear Model with Interaction Terms
+
+The next table still uses linear regression, but now we include some interaction terms to see how this affects the models. Notice the first interaction term in column 1, Platform\*10-day, is the **change in the effect on overall attitude change** (rather than just the effect) of waiting on the platform for those who were surveyed 10 days after the treatment, or vice versa. The coefficient for Platform now indicates the effect of waiting on the platform when 10-day is 0 or false, so being surveyed after 3 days, and the coefficient for 10-day indicates the effect of being surveyed 10 days after treatment when platform is 0 or false, so those who waited in their cars. This interpretation can be applied to the Platform\*Franklin interaction in column 2 as these are both dummy variables as well. For column 3, we have a dummy (White) interacted with a continuous variable (Income). The non-interaction effects are the same as above, the effect of white when income is 0, and the effect of income when not white. The interaction can be interpreted as the change in the effect of income on overall attitude change between those who are white and not white, or as the change in the effect of being white on overall attitude given a 1 dollar increase in income.
+
+```{r lm_2, results="asis"}
+
+# 2. Three or four basic linear regressions, but this time including some
+# interaction terms. This just provides an occasion, in the table caption or in
+# the paragraph about the table, to demonstrate the appropriate way to interpret
+# interactions. Results also shown in a stargazer table.
+
+# now with some interactions between the covariates
+
+ols.interaction1 <- lm(all_chg ~ treatment + waits_on_platform*time_length, data = x)
+
+ols.interaction2 <- lm(all_chg ~ treatment + white*income.new, data = x)
+
+ols.interaction3 <- lm(all_chg ~ treatment + waits_on_platform*line, data = x)
+
+stargazer(ols.interaction1, ols.interaction3, ols.interaction2, 
+          type = "html",
+          dep.var.labels = "Overall Attitude Change",
+          covariate.labels = c("Treatment",
+                               "Platform",
+                               "10-day",
+                               "Platform*10-day",
+                               "Franklin Line",
+                               "Platform*Franklin",
+                               "White",
+                               "Income",
+                               "White:Income",
+                               "Intercept"),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          notes = "All coefficients reported above are OLS coefficients. Positive numbers indicate more conservative responses.",
+          notes.align = "l"
+          )
+```
+<div style="margin-bottom:50px;">
+</div>
+
+## Simple Bayesian Model
+
+Now we will fit a simple stan_glm model where only the treatment indicator is used as a predictor. The resulting histograms show the posterior distribution for the intercept and treatment for all chains. Notice how we are no longer given a point estimate as with traditional linear regression, but a distribution of many estimates of which we take the mean.
+
+```{r bayes_1}
+# 3. Simplest possible stan_glm(), using treatment as the only independent
+# variable. Not sure what the best way to display the results are. Histogram of
+# coefficient estimates? stan_glm() has some nice stuff built in for this,
+# right?
+
+set.seed(9)
+
+# a simple stan_glm model to show distribution of coefficient estimates
+
+hiding.stuff <- capture.output(stan.mod1 <- stan_glm(all_chg ~ treatment, data = x))
+rm(hiding.stuff)
+
+stan.mod1$stan_summary[c(1,2),c(1:4,7,10)]
+
+# View distribution of posterior densities for intercept and treatment. We
+# should turn this into a proper figure, with title, captions, sources, and so
+# on.
+
+stan_hist(stan.mod1, fill = "dodgerblue")
+```
+
+<div style="margin-bottom:50px;">
+</div>
+
+```{r bayes_2, cache=TRUE}
+
+# 4. stan_glm() with different intercepts. Maybe the intercepts are just line,
+# or maybe station. Again, I don't know the best way to display these results.
+# But some of the stations have very small N, so there should be some strong
+# shrinkage displayed.
+
+# model with varying intercepts for station
+
+hide <- capture.output(vint.stan <- stan_lmer(all_chg ~ treatment + (1|station), data = x))
+
+# show estimates in plot, notice more uncertainty for smaller sample size
+
+print(vint.stan)
+
+stan_plot(vint.stan)
+
+# show no pooling, partial pooling, and complete pooling via plot
+
+pooled <- lm(all_chg ~ treatment, data = x)
+
+# complete-pooling intercept
+
+a_pooled <- coef(pooled)[1] 
+
+# complete-pooling slope
+
+b_pooled <- coef(pooled)[2]
+
+nopooled <- lm(all_chg ~ 0 + station + treatment,
+               data = x)
+
+# 9 no-pooling intercepts
+
+a_nopooled <- coef(nopooled)[1:9]  
+
+# no pool slope
+b_nopooled <- coef(nopooled)[9+1]
+
+# partial pooling from multi-level stan regression
+
+a_part_pooled <- coef(vint.stan)$station[, 1]
+b_part_pooled <- coef(vint.stan)$station[, 2]
+
+# plotting the data from above in Gelman fashion
+
+# outcome and treatment (jittered for plotting)
+y <- x$all_chg
+treat <- as.numeric(x$treatment) + runif(nrow(x), -.05, .05)
+
+# which stations to select
+station <- x$station
+sel.sta <- c("Grafton",
+             "Natick",
+             "Norfolk",
+             "Southborough",
+             "Wellesley Hills",
+             "West Natick",
+             "Norwood Depot",
+             "Windsor Gardens")
+
+# subset 8 of the stations; generate data frame
+df <- data.frame(y, treat, station)
+df8 <- subset(df, station %in% sel.sta)
+
+# assign estimates for pooling, partial pooling, and complete pooling to data
+
+df8$a_pooled <- a_pooled 
+df8$b_pooled <- b_pooled
+df8$a_nopooled <- a_nopooled[df8$station]
+df8$b_nopooled <- b_nopooled
+df8$a_part_pooled <- a_part_pooled[df8$station]
+df8$b_part_pooled <- b_part_pooled[df8$station]
+
+ggplot(data = df8, 
+       aes(x = treat, y = y)) + 
+  facet_wrap(facets = ~ station, 
+             ncol = 4) + 
+  theme_bw() +
+  geom_jitter(position = position_jitter(width = .05, 
+                                         height = 0)) +
+  geom_abline(aes(intercept = a_pooled, 
+                  slope = b_pooled), 
+              linetype = "solid", 
+              color = "blue", 
+              size = 0.5) +
+  geom_abline(aes(intercept = a_nopooled, 
+                  slope = b_nopooled), 
+              linetype = "longdash", 
+              color = "red", 
+              size = 0.5) + 
+  geom_abline(aes(intercept = a_part_pooled, 
+                  slope = b_part_pooled), 
+              linetype = "dotted", 
+              color = "purple", 
+              size = 0.9) + 
+  scale_x_continuous(breaks = c(0, 1), 
+                     labels = c("No treat.", "Treat.")) + 
+  labs(title = "Complete-pooling, No-pooling, and Partial pooling estimates Varying Slopes",
+       x = "", 
+       y = "Overall Attitude Change")+theme_bw( base_family = "serif")
+```
+
+
+Blue line indicates complete-pooling, red line indicates no pooling, and purple dotted line indicates partial pooling estimates. Notice how stations with small sample sizes have non-pooled estimates that deviate from the complete pool estimates, but then the partial pooled estimate says "wait a second, you have a sall sample size, I don't trust how much this estimate deviates from the pooled data," so then the partially pooled estimate is brought closser to the blue line.
+
+<div style="margin-bottom:50px;">
+</div>
+
+```{r bayes_3, cache=TRUE}
+# 5. stan_glm with different intercepts and slopes. This might be the last model
+# we show. As long as they do this well on the midterm, they should get full
+# credit. But it is hard to do well. In particular, what sort of displays should
+# be produced?
+
+hide <- capture.output(vslope.stan <- stan_lmer(all_chg ~ treatment + (treatment|station), data = x, adapt_delta = 0.97))
+
+print(vslope.stan)
+
+# show no pooling, partial pooling, and complete pooling via plot
+
+pooled <- lm(all_chg ~ treatment, data = x)
+
+# complete-pooling intercept
+
+a_pooled <- coef(pooled)[1] 
+
+# complete-pooling slope
+
+b_pooled <- coef(pooled)[2]
+
+nopooled <- lm(all_chg ~ 0 + station*treatment,
+               data = x)
+
+# 9 no-pooling intercepts
+
+a_nopooled <- coef(nopooled)[1:9]  
+
+# no pool slope
+b_nopooled <- coef(nopooled)[10] + coef(nopooled)[11:18]
+
+# partial pooling from multi-level stan regression
+
+a_part_pooled <- coef(vslope.stan)$station[, 1]
+b_part_pooled <- coef(vslope.stan)$station[, 2]
+
+# plotting the data from above in Gelman fashion
+
+# outcome and treatment (jittered for plotting)
+y <- x$all_chg
+treat <- as.numeric(x$treatment) + runif(nrow(x), -.05, .05)
+
+# which stations to select
+station <- x$station
+sel.sta <- c("Grafton",
+             "Natick",
+             "Norfolk",
+             "Southborough",
+             "Wellesley Hills",
+             "West Natick",
+             "Norwood Depot",
+             "Windsor Gardens")
+
+# subset 8 of the stations; generate data frame
+df <- data.frame(y, treat, station)
+df8 <- subset(df, station %in% sel.sta)
+
+# assign estimates for pooling, partial pooling, and complete pooling to data
+
+df8$a_pooled <- a_pooled 
+df8$b_pooled <- b_pooled
+df8$a_nopooled <- a_nopooled[df8$station]
+
+# this is hacky but I couldn't find a sensible way around the
+# commented out line below putting the wrong values in the cells
+# of df8
+
+names(b_nopooled)[1:8] <- c("Grafton",
+             "Natick",
+             "Norfolk",
+             "Norwood Depot",
+             "Southborough",
+             "Wellesley Hills",
+             "West Natick",
+             "Windsor Gardens")
+
+for(stat in names(b_nopooled)){
+  df8$b_nopooled[df8$station == stat] <- b_nopooled[stat]
+}
+
+#df8$b_nopooled <- b_nopooled[df8$station]
+df8$a_part_pooled <- a_part_pooled[df8$station]
+df8$b_part_pooled <- b_part_pooled[df8$station]
+
+ggplot(data = df8, 
+       aes(x = treat, y = y)) + 
+  facet_wrap(facets = ~ station, 
+             ncol = 4) + 
+  theme_bw() +
+  geom_jitter(position = position_jitter(width = .05, 
+                                         height = 0)) +
+  geom_abline(aes(intercept = a_pooled, 
+                  slope = b_pooled), 
+              linetype = "solid", 
+              color = "blue", 
+              size = 0.5) +
+  geom_abline(aes(intercept = a_nopooled, 
+                  slope = b_nopooled), 
+              linetype = "longdash", 
+              color = "red", 
+              size = 0.5) + 
+  geom_abline(aes(intercept = a_part_pooled, 
+                  slope = b_part_pooled), 
+              linetype = "dotted", 
+              color = "purple", 
+              size = 0.9) + 
+  scale_x_continuous(breaks = c(0, 1), 
+                     labels = c("No treat.", "Treat.")) + 
+  labs(title = "Complete-pooling, No-pooling, and Partial pooling estimates Varying Slopes and Intercepts",
+       x = "", 
+       y = "Overall Attitude Change",
+       caption = "Windsor Gardens no pooling slope omitted due to collinearity")+theme_bw( base_family = "serif")
+
+```
+
+Now we allow the intercepts and the effect of treatment i.e., the slope, vary by station for the red and purple lines. Notice how some stations actually exhibit a negative effect of treatment for the no pooling model, but the partial pooling model brings these estimates back toward the blue line when considering the sample size within each station. Also notice how if the effect is quite drastic, as it is for West Natick, the partial pooling estimate will deviate more from the blue line (complete pooling). We a similar effect at Norfolk Station, but this time due to sample size rather than effect size.
+
+<div style="margin-bottom:50px;">
+</div>
+
+
+# Appendix
+
+## Table 1. Experiment results
+
+I am able to replicate all the numbers from Table 1. One clarification is that the values for *n* are somewhat misleading. *n* varies across the questions. For example, *n* for the question about "English as official language?" is 109, as stated. But the *n* for "Number of immigrants be increased" is only 106. It is, obviously, sloppy to list a single *n* when, in fact, *n* varies across questions. The same issue arises with regard to the subset of commuters who wait in the platform. The *n* for "Number of immigrants be increased" is only 98, as compared to the stated 100 for the other two questions. This is a minor point with no meaningful implication for the results.
+
+```{r table_1, cache=TRUE}
+# Note how hard it is to grok this code without comments. And, even if you wrote
+# it yourself, it would all be opaque two years from now without comments.
+
+# There are three key questions and, for some reason, .x and .y versions of
+# those variables. Why?
+
+repeats <- c("numberim", "Remain", "Englishlan")
+
+x.names <- paste(repeats, ".x", sep = "")
+y.names <- paste(repeats, ".y", sep = "")
+
+# Which train line is definately important. What would happened if we handled this differently?
+
+covariates <- c('line.x')
+
+# final.mat is where we are going to place the results as we loop through.
+
+final.mat <- matrix(nrow = 0, ncol = 8)
+
+# We need to do the same code for both all individuals and for those who wait on
+# the platform (hence "no.car"). By the way, how did they figure out ahead of
+# time about the importance of waiting in cars?
+
+subsets <- c('all', 'no.car')
+
+# This code is absurd. Not the least is using "subset" --- the name of a base
+# function! --- as a character vector. Worth the hour (or more!) it would take
+# to refactor?
+
+for(subset in subsets){
+
+	out.mat = matrix(nrow = length(repeats), ncol = 8)
+	
+	if(subset == 'all'){
+		dat.subset = dat.all
+		}
+	if(subset ==  'no.car'){
+		dat.subset = dat.all[dat.all$habits != 1,]
+		}
+
+		
+	z.variable = 'treatment'
+	
+	# This portion is really tricky because x.new and friends gets created as a
+	# data.frame, which is now just an element of the dat.subset list. That is
+	# weird enough, but then, later, we try to work with it and bad stuff happens.
+	# I suspect that all this is fine if we just never turned the initial data into
+	# a tibble. But maybe not! And, even if it does work, it is a bad idea. Trick
+	# was to add "drop = TRUE", which ensures that the resulting object is a
+	# vector.
+	
+	for(j in 1:length(repeats)){
+		dat.subset$x.new <- (dat.subset[, x.names[j], drop = TRUE]- 1)/4  ##rescale x to 0-1
+		dat.subset$y.new <- (dat.subset[, y.names[j], drop = TRUE]- 1)/4  ##rescale y to 0-1
+		dat.subset$Y     <-  dat.subset$y.new - dat.subset$x.new
+		
+		dat.use <- dat.subset[is.na(dat.subset$Y) == F, ]
+		
+		x.sd = sd(as.vector(dat.use$x.new),na.rm = T)
+		x.mean = mean(dat.use$x.new,na.rm = T)
+		y.mean = mean(dat.use$y.new,na.rm = T)
+		y.treat = mean(dat.use$y.new[dat.use$treatment==1],na.rm = T)
+	
+		station.treatment.table <- table(dat.use$station, dat.use[ ,z.variable, drop = TRUE])
+		no.control.stations = names(which(station.treatment.table[,1] == 0))
+		no.treatment.stations = names(which(station.treatment.table[,2] == 0))
+		dat.use = dat.use[!dat.use$station%in%c(no.control.stations,no.treatment.stations),]
+				
+		
+		dat.use$station = factor(dat.use$station)
+		dat.use$treated_unit = factor(dat.use$treated_unit)
+		Xs = data.matrix(dat.use[,covariates])
+		
+		perms <- genperms(Z = dat.use[,z.variable], blockvar=dat.use$station, clustvar=dat.use$treated_unit)
+		probs = genprobexact(Z = dat.use[,z.variable], blockvar=dat.use$station, clustvar=dat.use$treated_unit)
+
+		ate = estate(Y = dat.use$Y, Z = dat.use[, z.variable, drop = TRUE], X = Xs, prob = probs)
+		Ys = genouts(Y = dat.use$Y, Z = dat.use[, z.variable, drop = TRUE], ate = 0)
+		distout <- gendist(Ys,perms, prob=probs)
+		disp =	dispdist(distout, ate = ate, display.plot = FALSE)
+		
+		out.mat[j,1] = repeats[j]
+		out.mat[j,2] = subset
+		out.mat[j,3] = nrow(dat.use)
+		out.mat[j,4] = ate
+		out.mat[j,5] = disp$greater.p.value
+		out.mat[j,6] = disp$lesser.p.value
+		out.mat[j,7] = x.sd
+		out.mat[j,8] = x.mean
+		}
+	final.mat = rbind(final.mat, out.mat)
+}
+
+# Clean up the result and save it for later.
+
+final.mat <- as.data.frame(final.mat)
+colnames(final.mat) <- c('variable','subset','N','ate','greater.p.value','lesser.p.value','x.sd','x.mean')
+
+
+final.mat.main <- final.mat 
+
+```
+
+
+
+```{r output_create, results="asis", cache=TRUE}
+# OMG! He calculates many (most?) of these numbers as factors! Check out
+# sapply(final.mat.main, class). (Or is that somehow my fault for using tibbles
+# instead of data frames?) Then he has to convert to character and then to
+# numeric to use them properly. Insanity! 
+
+# But, also, there should be a better way to clean this up.
+
+final.mat.main$ate    <- as.numeric(as.character(final.mat.main$ate)) 
+final.mat.main$N      <- as.numeric(as.character(final.mat.main$N)) 
+final.mat.main$x.mean <- as.numeric(as.character(final.mat.main$x.mean)) 
+final.mat.main$x.sd   <- as.numeric(as.character(final.mat.main$x.sd)) 
+final.mat.main$greater.p.value <- as.numeric(as.character(final.mat.main$greater.p.value)) 
+
+# Now that we have final.mat.main, we can make some nice output. The annoying
+# part is that this data is very poorly organized, if our main purpose is to
+# create Table 1. I really ought to go back and recalculate these data frames in
+# a tidyier fashion. But, for now, we will just pick out the parts we want.
+
+# This was annoyingly hard, which goes to show why it is nice to calculate
+# important numbers in a sensible way in the first place. Main trick is to
+# create something of a convenient size, fill in the numbers and then start
+# tabling. Must be easier ways to do this.
+
+as_tibble(x = matrix(data = NA_real_, 
+                     nrow = 4, 
+                     ncol = 6,
+                     dimnames = list(NULL, paste0("V", 1:6)))) %>%  
+  
+  # Remember: tibbles can't have row names anymore. So, we need to make them a
+  # variable.
+  
+  mutate(question = c('Number of immigrants be increased?',
+                      'Children of undocumented be allowed to stay?',
+                      'English as official language?', 
+                      'n')) %>% 
+  mutate(V1 = c(final.mat.main$ate[1:3], final.mat.main$N[2]),
+         V2 = c(final.mat.main$ate[4:6], final.mat.main$N[5]),
+         V3 = c(final.mat.main$x.mean[1:3], final.mat.main$N[2]),
+         V4 = c(final.mat.main$greater.p.value[1:3], NA),
+         V5 = c(final.mat.main$greater.p.value[4:6], NA),
+         V6 = c(final.mat.main$x.sd[1:3], NA)) %>% 
+
+  #  Start charting!
+
+  gt() %>% 
+  tab_header(title = "Table 1. Experiment results") %>% 
+  
+  cols_move_to_start(columns = vars(question)) %>% 
+  
+  fmt_number(columns = starts_with("V"), decimals = 3, drop_trailing_zeros = TRUE) %>%
+  
+  # Combine the columns.
+  
+  cols_merge(col_1 = vars(V1), col_2 = vars(V4), pattern = "{1} ({2})") %>% 
+  cols_merge(col_1 = vars(V2), col_2 = vars(V5), pattern = "{1} ({2})") %>% 
+  cols_merge(col_1 = vars(V3), col_2 = vars(V6), pattern = "{1} ({2})") %>% 
+  
+  cols_label(question =  "Question",        
+             V1 = "ATE (P)",
+             V2 = "CATE (P)",
+             V3 = "T1 levels (SD)") %>% 
+  
+  cols_move(columns = vars(V3), after = vars(question)) %>% 
+  
+  tab_spanner(label = "All respondents",   columns = vars(V1, V3)) %>% 
+  tab_spanner(label = "Waits on platform", columns = vars(V2)) %>% 
+
+  tab_source_note(source_note = 'In the first "All respondents" column, ATE represents responses in T2-T1 for the treatment group compared with the control group for the entire experimental sample. Positive values mean a more politically conservative response. In the "Waits on platform" column, CATEs are the Conditional Average Treatment Effects for persons who said they stand on the platform, rather than wait in their cars. In the second "All respondents" column, T1 levls and SDs for each variable for all respondents. All variables are scaled 0--1.') %>% 
+  
+  tab_options(footnote.glyph = c("*", "&dagger;")) %>%   
+  
+  tab_footnote(
+    footnote = "P values from a one-tailed test against the Null Hypothesis of no effect are in parantheses.",
+    locations = cells_column_labels(
+      columns = vars(V1))) %>% 
+  
+  tab_footnote(
+    footnote = "Each of the questions allowed responses on a five-point scale ranging from strongly agree to stringly disagree (exact answers were changed to be appropriate to the actual question.",
+    locations = cells_data(
+      columns = vars(question),
+      rows = 1)) %>% 
+
+  # Should be possible to replace as_raw_html() with as_latex() and then knit to
+  # PDF. Alas, I can't get it to work. I suspect that gt may be doing some
+  # tricky latex code which the default packages has trouble with. Ought to try
+  # to simplify this to a reproducible example, even dive into the .tex output.
+  
+  as_raw_html() %>% as.character() %>% cat()
+
+# Discuss the confusion about exactly what those numbers mean. Does a high
+# number mean the conservative answer?
+
+
+```
+
+## Table 2
+
+I am able to replicate almost all the values for Table 2. The biggest discrepancy is that I do not know where the values for $n$ come from. The raw data only has 123 observations, so how can we possibly have 117 control and 103 treated, as the published results claim? It looks like, from Table 3, that these are the numbers of control/treated who returned the first survey. Yet that is not the relevant $n$ for Table 2. All my other numbers match, except for income, but, even there, my results are very close to those published.
+
+```{r table_2, results="asis", tab.cap = NULL, cache=TRUE}
+# I believe that this is the code which drives Table 2. I deleted the other
+# tests. Note that income is present in the published table but at a different
+# location than in the code. I could not get replicate the income numbers.
+# Error?
+
+out.balance.test <- xBalance(fmla = treatment ~ liberal + republican + obama.disapprove + 
+                               ride.everyday + voted.2010 + romney.voter + Hispanics.x + 
+                               age + residency.new + college + male +
+                               hispanic.new +  white + income.new, data = dat.all, 
+                             report = c("std.diffs","z.scores","adj.means"), 
+                             strata = factor(dat.all$station))
+
+# This creates an object of class xbal, which is obviously too annoying to work
+# with since it is also a list with two items, and the first item is very
+# strange. However, the below incantation gets out the matrix of numbers we care
+# about. Is there a better way?
+
+# Once I have the data, I add a labelling var before getting to gt.
+
+x <- as_tibble(out.balance.test[1]$results[,,1][, 1:4]) %>% 
+  
+  add_row(`treatment=0` = sum(dat.all$treatment == 0), `treatment=1` = sum(dat.all$treatment == 1)) %>% 
+  
+  mutate(condition = c("Liberal", "Republican", "Obama disapprove", 
+                  "Ride MBTA every day", "Voted 2010", "Romney voter", "Hispanic threat", 
+                   "Age", "Residency year", "College", "Male",  
+                   "Hispanic", "White", "Income", "n"))
+
+
+# Enos just uses xtable(), for which xbal provides a method. But it sure does
+# look ugly because xtable() has so few options. I will use gt.
+
+# https://gt.rstudio.com/articles/creating-display-tables.html
+
+# I should do everything with gt going forward. It is obviously the future of
+# table making in R. Are they working on regression displays? Still not sure how
+# to use gt_preview() interactively.
+
+gt_tbl <- x %>% 
+  gt() %>% 
+  tab_header(title = "Table 2. Covariate balance across treatment conditions") %>% 
+  
+  cols_move_to_start(columns = vars(condition)) %>% 
+  
+  # Set column names. Note that you need to use the original variable names in
+  # functions like tab_footnote() even though we call those functions after
+  # setting the column names. In other words, these are just for display, they
+  # don't effect the data we are passing through the pipe.
+  
+  cols_label(condition =  "Condition",        
+             `treatment=0` = "Control",
+             `treatment=1` = "Treatment",
+             std.diff = "Standard difference",       
+             z = "Z Score") %>% 
+  
+  # Get the formatting correct.
+  
+  fmt_number(columns = vars(`treatment=0`, `treatment=1`, std.diff, z),
+             decimals = 2) %>% 
+  fmt_number(columns = vars(`treatment=0`, `treatment=1`),
+             decimals = 0,
+             rows = c(14, 15)) %>% 
+  fmt_missing(columns = vars(std.diff, z), rows = 15, missing_text = "") %>% 
+  
+  # Take care of the footnotes. 
+  
+  tab_options(footnote.glyph = c("*", "&dagger;")) %>%   
+  
+  tab_footnote(
+    footnote = "Difference in standardized units.",
+    locations = cells_column_labels(
+      columns = vars(std.diff))) %>% 
+  
+  tab_footnote(
+    footnote = "Mean response values for the pretreatment variables accounting for stratification into train stations. All variables are 0 and 1 variables, except for Hispanic threat, which is a seven-point scale indicating how threatening respondents find Hispanics, recoded 0--1; residency, which is measured in years; and income, which is annual income in dollars.",
+    locations = cells_data(
+      columns = vars(condition),
+      rows = 1)) 
+
+gt_tbl %>% as_raw_html() %>% as.character() %>% cat()
+
+```
+
+
+## Figure 2
+
+I can replicate Figure 2.
+
+```{r figure_2, cache=TRUE, fig.cap= "Fig. 2.    Time effects. ATE and 95% confidence intervals for 3-d treatment (solid circle) and 10-d treatment  (open circle). P values from top to bottom generated from a two-tailed test against the Null Hypothesis of no difference in effect between the 3-d and 10-d treatments are P = 0.195, 0.094, and 0.305. n = 55 for 3-d dose and 54 for 10-d dose. Confidence intervals are constructed by drawing the 2.5% and 97.5% quantiles from the randomized distribution."}
+
+# I used Gabe Walker's work as a guide in completing this figure.
+
+repeats <- c("numberim","Remain","Englishlan")
+
+x.names <- paste(repeats,".x",sep="")
+y.names <- paste(repeats,".y",sep="")
+
+covariates <- c('line.x')
+
+var.names <- c('Number of immigrants be increased?','Children of undocumented be allowed to stay?','English as official language?')
+
+	
+##dose response estimates comparison
+
+final.mat <- matrix(nrow = 0, ncol = 8)
+subsets <- c('ta', 'tb')
+
+
+for(subset in subsets){
+
+	out.mat <- matrix(nrow = length(repeats), ncol = 8)
+	
+	if(subset == 'ta'){
+		dat.subset <- dat.all[dat.all$t.time %in% c('t2a', 't4a'),]
+	}
+	if(subset == 'tb'){
+		dat.subset <- dat.all[dat.all$t.time %in% c('t2b', 't4b'),]
+	}
+	
+	z.variable <- 'treatment'
+	
+	for(j in 1:length(repeats)){
+	  
+	  # We use this (exact?) same code twice. Clean this up! Or do we need to do it
+	  # twice because the universe is different each time and, therefore, the
+	  # rescaling? No! It is an absolute, not relative, rescaling.
+	  
+	  dat.subset$x.new <- (dat.subset[, x.names[j], drop = TRUE]- 1)/4  ##rescale x to 0-1
+		dat.subset$y.new <- (dat.subset[, y.names[j], drop = TRUE]- 1)/4  ##rescale y to 0-1
+		dat.subset$Y <- dat.subset$y.new - dat.subset$x.new
+	
+		dat.use <- dat.subset[is.na(dat.subset$Y) == FALSE, ]
+				
+		x.sd <- sd(dat.use$x.new, na.rm = TRUE)
+		x.mean <- mean(dat.use$x.new, na.rm = TRUE)
+		
+		station.treatment.table <- table(dat.use$station, dat.use[, z.variable, drop = TRUE])
+		
+		no.control.stations = names(which(station.treatment.table[,1] == 0))
+		no.treatment.stations = names(which(station.treatment.table[,2] == 0))
+		dat.use = dat.use[!dat.use$station%in%c(no.control.stations,no.treatment.stations),]
+		
+		dat.use$station = factor(dat.use$station)
+		dat.use$treated_unit = factor(dat.use$treated_unit)
+		Xs = data.matrix(dat.use[,covariates])
+		
+		perms <- genperms(Z = dat.use[,z.variable], blockvar=dat.use$station, clustvar=dat.use$treated_unit)
+		probs = genprobexact(Z = dat.use[,z.variable], blockvar=dat.use$station, clustvar=dat.use$treated_unit)
+		ate = estate(Y = dat.use$Y, Z = dat.use[, z.variable, drop = TRUE], X = Xs, prob = probs)
+		Ys = genouts(Y = dat.use$Y, Z = dat.use[, z.variable, drop = TRUE], ate = ate)
+		distout <- gendist(Ys,perms, prob=probs)
+		disp =	dispdist(distout, ate = ate, display.plot = F)
+		
+		##fill matrix
+		out.mat[j,1] = repeats[j]
+		out.mat[j,2] = subset
+		out.mat[j,3] = nrow(dat.use)
+		out.mat[j,4] = ate
+		out.mat[j,5] = x.mean
+		out.mat[j,6] = x.sd
+		out.mat[j,7] = disp$quantile[1]
+		out.mat[j,8] = disp$quantile[2]
+		}
+		final.mat = rbind(final.mat,out.mat)
+	}
+final.mat = as.data.frame(final.mat)
+colnames(final.mat) = c('variable','subset','N','ate','x.mean','x.sd','quantile.lower','quantile.upper')
+
+final.mat.dose = final.mat ##mat for creating graph later
+
+# Code from output_graphic_pnas. Note that we only need the first chunk to
+# reproduce Figure 2. That is, I think that Enos creates two or three final.mat,
+# as in the above code, and then plots them. But all those results, except the
+# one by dose, are related to supplementary material. So, all we need is one
+# version of the data code and one version of the plotting code. 
+
+# It would be a useful exercise to refactor both chunks of code so that it is
+# easier to produce any of these plots. But not today.
+
+##outgraphic_single.r
+###create ouptput plots
+####RdE November 2012
+	
+# ####create output
+output.vars = c('numberim','Remain','Englishlan')
+var.names = c('Number of immigrants be increased?','Children of undocumented be allowed to stay?','English as official language?')
+
+##graph presets
+os = .4
+line.os = .015
+y.point = .75
+ylims = c(0,1.1)
+xlims = c(-.35,.35)
+points.cex = 4
+lab.cex = 1.5
+line.lwd = 4.5
+axis.cex = 1.25
+
+colors = brewer.pal(3,'Paired')[1:2] ##colors for pairs used in plots below
+
+
+par(mfrow = c(3,1)) 
+par(mar = c(5,0,1,0))
+par(bty = 'n')
+
+	
+##dose response graph
+out.mat = final.mat.dose[,c('variable','subset','ate','quantile.lower','quantile.upper')]
+out.mat$ate = as.numeric(as.character(out.mat$ate))
+out.mat$quantile.lower = as.numeric(as.character(out.mat$quantile.lower))
+out.mat$quantile.upper = as.numeric(as.character(out.mat$quantile.upper))
+
+out.mat.ta = out.mat[out.mat$subset == 'ta'&out.mat$variable %in% output.vars,]
+out.mat.tb = out.mat[out.mat$subset == 'tb'&out.mat$variable %in% output.vars,]
+
+for(i in 1:length(var.names)){
+	plot(x  = out.mat.ta$ate[i], y = y.point, 
+		xlim = xlims,
+		ylim = ylims,
+		ylab = '',
+		xlab = var.names[i],
+		yaxt = 'n',
+		type = 'n',
+		cex.lab = lab.cex,
+		cex.axis = axis.cex)
+	lines(x = c(out.mat.ta$quantile.lower[i],out.mat.ta$ate[i]-line.os), 
+			y = c(y.point,y.point),
+			lty = 1,
+			col = colors[1],
+			lwd = line.lwd)
+	lines(x = c(out.mat.ta$ate[i]+line.os,out.mat.ta$quantile.upper[i]), 
+			y = c(y.point,y.point),
+			lty = 1,
+			col = colors[1],
+			lwd = line.lwd)
+	lines(x = c(out.mat.tb$quantile.lower[i],out.mat.tb$ate[i]-line.os), 
+			y = c(y.point-os,y.point-os),
+			lty = 1,
+			col = colors[2],
+			lwd = line.lwd)
+	lines(x = c(out.mat.tb$ate[i]+line.os,out.mat.tb$quantile.upper[i]), 
+			y = c(y.point-os,y.point-os),
+			lty = 1,
+			col = colors[2],
+			lwd = line.lwd)
+
+	points(x  = out.mat.ta$ate[i], y = y.point,
+		pch = 19,
+		cex = points.cex,
+		col = colors[1])
+	points(x  = out.mat.tb$ate[i], y = y.point - os,
+		pch = 1,
+		cex = points.cex,
+		col = colors[2])
+			}
+
+
+```
+
+
+
+# References
